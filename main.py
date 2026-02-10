@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment variables
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+pymysql://HumansService:XHHxECL54EjvhhPSBLMU@familiez-test-be/humans"
+    "mysql+pymysql://HumansService:XHHxECL54EjvhhPSBLMU@localhost:3306/humans"
 )
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
