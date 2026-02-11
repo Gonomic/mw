@@ -2,25 +2,61 @@ version: '3.8'
 
 services:
   mysql:
-    # Use MariaDB for compatibility with BE custom images/scripts
-    image: mariadb:10.6
+    image: mysql:8.0
     container_name: familiez-mysql
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: humans
-      MYSQL_USER: HumansService
-      MYSQL_PASSWORD: XHHxECL54EjvhhPSBLMU
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-humans}
+      MYSQL_USER: ${DB_USER:-HumansService}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-XHHxECL54EjvhhPSBLMU}
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      # Mount BE init scripts so MariaDB initializes the DB on first start
-      - ../BE/init:/docker-entrypoint-initdb.d:ro
+      - ../BE/init:/docker-entrypoint-initdb.d  # SQL init scripts
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       timeout: 20s
       retries: 10
+    networks:
+      - familiez-network
+
+  mw:
+    build: .
+    container_name: familiez-mw
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://${DB_USER:-HumansService}:${DB_PASSWORD:-XHHxECL54EjvhhPSBLMU}@mysql:3306/${DB_NAME:-humans}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - .:/app  # Hot reload in development
+    networks:
+      - familiez-network
+
+  fe:
+    build:
+      context: ../FE
+      dockerfile: dockerfile.dev
+    container_name: familiez-fe
+    restart: always
+    ports:
+      - "5173:5173"
+    depends_on:
+      - mw
+    volumes:
+      - ../FE:/app
+      - /app/node_modules
+    networks:
+      - familiez-network
 
 volumes:
   mysql_data:
+
+networks:
+  familiez-network:
+    driver: bridge
