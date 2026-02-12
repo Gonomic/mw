@@ -120,3 +120,133 @@ def get_father(
     except Exception as e:
         logger.error(f"Error in get_father: {e}")
         raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetPersonDetails")
+def get_person_details(
+    personID: int = Query(..., description="Person ID to get details for")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            # Use simple SELECT instead of stored procedure to avoid missing columns
+            results_proxy = connection.execute(
+                text("""
+                    SELECT 
+                        PersonID,
+                        PersonGivvenName,
+                        PersonFamilyName,
+                        PersonDateOfBirth,
+                        PersonPlaceOfBirth,
+                        PersonDateOfDeath,
+                        PersonPlaceOfDeath,
+                        PersonIsMale
+                    FROM persons
+                    WHERE PersonID = :personId
+                """),
+                {"personId": personID}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_person_details: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetMother")
+def get_mother(
+    childID: int = Query(..., description="Person ID of the child to lookup the mother for")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            results_proxy = connection.execute(
+                text("call GetMother(:childId)"),
+                {"childId": childID}
+            )
+            results = results_proxy.fetchall()
+            # GetMother returns MotherID like GetFather returns FatherID
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_mother: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetChildren")
+def get_children(
+    personID: int = Query(..., description="Person ID to get children for")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            # Use the correct stored procedure name
+            results_proxy = connection.execute(
+                text("call GetAllChildrenWithoutPartnerFromOneParent(:parentId)"),
+                {"parentId": personID}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_children: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetPartners")
+def get_partners(
+    personID: int = Query(..., description="Person ID to get partners for")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            # Query partners from relations table
+            results_proxy = connection.execute(
+                text("""
+                    SELECT DISTINCT
+                        p.PersonID,
+                        p.PersonGivvenName,
+                        p.PersonFamilyName,
+                        p.PersonDateOfBirth,
+                        p.PersonDateOfDeath
+                    FROM relations r1
+                    JOIN relationnames rn ON r1.RelationName = rn.RelationnameID
+                    JOIN persons p ON r1.RelationWithPerson = p.PersonID
+                    WHERE r1.RelationPerson = :personId
+                    AND rn.RelationnameName IN ('Partner', 'Echtgenoot', 'Echtgenote')
+                """),
+                {"personId": personID}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_partners: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.post("/UpdatePerson")
+def update_person(
+    person_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    try:
+        with engine.connect() as connection:
+            person_id = person_data.get('personId')
+            results_proxy = connection.execute(
+                text("""call ChangePerson(
+                    :personId, 
+                    :givvenName, 
+                    :familyName, 
+                    :dateOfBirth,
+                    :placeOfBirth,
+                    :dateOfDeath,
+                    :placeOfDeath
+                )"""),
+                {
+                    "personId": person_id,
+                    "givvenName": person_data.get('PersonGivvenName', ''),
+                    "familyName": person_data.get('PersonFamilyName', ''),
+                    "dateOfBirth": person_data.get('PersonDateOfBirth'),
+                    "placeOfBirth": person_data.get('PersonPlaceOfBirth'),
+                    "dateOfDeath": person_data.get('PersonDateOfDeath'),
+                    "placeOfDeath": person_data.get('PersonPlaceOfDeath')
+                }
+            )
+            connection.commit()
+            return {"success": True}
+    except Exception as e:
+        logger.error(f"Error in update_person: {e}")
+        raise HTTPException(status_code=500, detail="Update failed")
