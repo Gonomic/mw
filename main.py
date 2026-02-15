@@ -250,3 +250,168 @@ def update_person(
     except Exception as e:
         logger.error(f"Error in update_person: {e}")
         raise HTTPException(status_code=500, detail="Update failed")
+
+
+@app.post("/AddPerson")
+def add_person(
+    person_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    try:
+        with engine.connect() as connection:
+            full_name = f"{person_data.get('PersonGivvenName', '')} {person_data.get('PersonFamilyName', '')}".strip()
+            logger.info(f"AddPerson called with: {full_name}")
+            
+            # Call AddPerson procedure
+            try:
+                results_proxy = connection.execute(
+                    text("""call AddPerson(
+                        NULL,
+                        :givvenName, 
+                        :familyName, 
+                        :dateOfBirth,
+                        :placeOfBirth,
+                        :dateOfDeath,
+                        :placeOfDeath,
+                        :isMale,
+                        :motherId,
+                        :fatherId,
+                        NULL,
+                        0,
+                        0
+                    )"""),
+                    {
+                        "givvenName": person_data.get('PersonGivvenName', ''),
+                        "familyName": person_data.get('PersonFamilyName', ''),
+                        "dateOfBirth": person_data.get('PersonDateOfBirth') or None,
+                        "placeOfBirth": person_data.get('PersonPlaceOfBirth') or None,
+                        "dateOfDeath": person_data.get('PersonDateOfDeath') or None,
+                        "placeOfDeath": person_data.get('PersonPlaceOfDeath') or None,
+                        "isMale": person_data.get('PersonIsMale', 1),
+                        "motherId": person_data.get('MotherId') or None,
+                        "fatherId": person_data.get('FatherId') or None,
+                    }
+                )
+                results = results_proxy.fetchall()
+                logger.info(f"AddPerson procedure completed, results count: {len(results) if results else 0}")
+                
+                if results and len(results) > 0:
+                    result_dict = results[0]._asdict() if hasattr(results[0], '_asdict') else dict(results[0])
+                    logger.info(f"First result keys: {list(result_dict.keys())}, values: {result_dict}")
+                    
+                    # Check if procedure succeeded (CompletedOk == 0)
+                    if result_dict.get('CompletedOk') != 0:
+                        logger.error(f"AddPerson procedure failed with CompletedOk={result_dict.get('CompletedOk')}")
+                        connection.rollback()
+                        return {"success": False, "error": "Database procedure mislukt"}
+                
+                connection.commit()
+                
+            except Exception as proc_error:
+                logger.error(f"AddPerson procedure error: {proc_error}")
+                connection.rollback()
+                error_msg = str(proc_error)
+                if 'Incorrect date value' in error_msg:
+                    return {"success": False, "error": "Datumfout - controleer datum formaat"}
+                elif 'foreign key' in error_msg.lower():
+                    return {"success": False, "error": "Vader/Moeder ID niet gevonden"}
+                return {"success": False, "error": f"Database fout: {error_msg[:50]}"}
+            
+            # Now fetch the inserted person by name and other details
+            logger.info(f"Fetching inserted person: {person_data.get('PersonGivvenName')} {person_data.get('PersonFamilyName')}")
+            
+            select_results = connection.execute(
+                text("""
+                    SELECT PersonID, PersonGivvenName, PersonFamilyName, PersonDateOfBirth, 
+                           PersonPlaceOfBirth, PersonDateOfDeath, PersonPlaceOfDeath, PersonIsMale
+                    FROM persons 
+                    WHERE PersonGivvenName = :givvenName AND PersonFamilyName = :familyName
+                    ORDER BY PersonID DESC
+                    LIMIT 1
+                """),
+                {
+                    "givvenName": person_data.get('PersonGivvenName', ''),
+                    "familyName": person_data.get('PersonFamilyName', '')
+                }
+            ).fetchall()
+            
+            if select_results and len(select_results) > 0:
+                person_dict = select_results[0]._asdict() if hasattr(select_results[0], '_asdict') else dict(select_results[0])
+                logger.info(f"Found inserted person with ID: {person_dict.get('PersonID')}")
+                return {
+                    "success": True, 
+                    "personId": person_dict.get('PersonID')
+                }
+            else:
+                logger.error("Could not find inserted person after AddPerson procedure")
+                return {"success": False, "error": "Persoon opgeslaan maar kon niet worden opgehaald"}
+                
+    except Exception as e:
+        logger.error(f"Error in add_person: {e}", exc_info=True)
+        error_msg = str(e)
+        return {
+            "success": False, 
+            "error": f"Onverwachte fout: {error_msg[:60]}"
+        }
+
+
+
+
+
+
+@app.post("/DeletePerson")
+def delete_person(
+    person_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    try:
+        with engine.connect() as connection:
+            person_id = person_data.get('personId')
+            mother_id = person_data.get('MotherId') or None
+            father_id = person_data.get('FatherId') or None
+            partner_id = person_data.get('PartnerId') or None
+            
+            logger.info(f"DeletePerson called for personId: {person_id}")
+            
+            results_proxy = connection.execute(
+                text("""call deletePerson(
+                    :personId,
+                    :motherId,
+                    :fatherId,
+                    :partnerId,
+                    :timestamp
+                )"""),
+                {
+                    "personId": person_id,
+                    "motherId": mother_id,
+                    "fatherId": father_id,
+                    "partnerId": partner_id,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+            )
+            results = results_proxy.fetchall()
+            
+            logger.info(f"DeletePerson results: {results}")
+            
+            # Check for CompletedOk status
+            if results and len(results) > 0:
+                result_dict = results[0]._asdict() if hasattr(results[0], '_asdict') else dict(results[0])
+                logger.info(f"Result dict: {result_dict}")
+                
+                completed_ok = result_dict.get('CompletedOk')
+                if completed_ok == 0:
+                    connection.commit()
+                    return {"success": True}
+                else:
+                    logger.warning(f"DeletePerson returned CompletedOk: {completed_ok}")
+                    return {"success": False, "error": "Verwijdering mislukt - controleer database logs"}
+            
+            connection.commit()
+            return {"success": True}
+            
+    except Exception as e:
+        logger.error(f"Error in delete_person: {e}", exc_info=True)
+        error_msg = str(e)
+        return {
+            "success": False, 
+            "error": f"Verwijdering mislukt: {error_msg[:80]}"
+        }
+
