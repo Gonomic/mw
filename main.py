@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, Query, HTTPException
@@ -219,6 +219,57 @@ def get_partners(
         raise HTTPException(status_code=500, detail="Query failed")
 
 
+@app.get("/GetPossibleMothersBasedOnAge")
+def get_possible_mothers_based_on_age(
+    personDateOfBirth: date = Query(..., description="Birth date of the child (YYYY-MM-DD)")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            results_proxy = connection.execute(
+                text("call getPossibleMothersBasedOnAge(:personAgeIn)"),
+                {"personAgeIn": personDateOfBirth}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_possible_mothers_based_on_age: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetPossibleFathersBasedOnAge")
+def get_possible_fathers_based_on_age(
+    personDateOfBirth: date = Query(..., description="Birth date of the child (YYYY-MM-DD)")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            results_proxy = connection.execute(
+                text("call getPossibleFathersBasedOnAge(:personAgeIn)"),
+                {"personAgeIn": personDateOfBirth}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_possible_fathers_based_on_age: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetPossiblePartnersBasedOnAge")
+def get_possible_partners_based_on_age(
+    personDateOfBirth: date = Query(..., description="Birth date of the person (YYYY-MM-DD)")
+) -> List[Dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            results_proxy = connection.execute(
+                text("call getPossiblePartnersBasedOnAge(:personAgeIn)"),
+                {"personAgeIn": personDateOfBirth}
+            )
+            results = results_proxy.fetchall()
+            return format_result(results)
+    except Exception as e:
+        logger.error(f"Error in get_possible_partners_based_on_age: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
 @app.post("/UpdatePerson")
 def update_person(
     person_data: Dict[str, Any]
@@ -287,7 +338,7 @@ def add_person(
                         :isMale,
                         :motherId,
                         :fatherId,
-                        NULL,
+                        :partnerId,
                         0,
                         0
                     )"""),
@@ -301,6 +352,7 @@ def add_person(
                         "isMale": is_male,
                         "motherId": person_data.get('MotherId') or None,
                         "fatherId": person_data.get('FatherId') or None,
+                        "partnerId": person_data.get('PartnerId') or None,
                     }
                 )
                 results = results_proxy.fetchall()
