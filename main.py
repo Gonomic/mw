@@ -33,6 +33,55 @@ def format_result(results: List[Any]) -> List[Dict[str, Any]]:
     result_dicts = [row._asdict() for row in results]
     return [{"numberOfRecords": len(result_dicts)}, *result_dicts]
 
+RELEASE_TABLES = {
+    "fe": ("fe_releases", "fe_release_changes"),
+    "mw": ("mw_releases", "mw_release_changes"),
+    "be": ("be_releases", "be_release_changes"),
+}
+
+def fetch_releases(component: str) -> List[Dict[str, Any]]:
+    if component not in RELEASE_TABLES:
+        raise HTTPException(status_code=400, detail="Invalid component. Use fe, mw, or be.")
+
+    releases_table, changes_table = RELEASE_TABLES[component]
+    query = text(f"""
+        SELECT
+            r.ReleaseID,
+            r.ReleaseNumber,
+            DATE_FORMAT(r.ReleaseDate, '%Y-%m-%d %H:%i:%s') AS ReleaseDate,
+            r.Description,
+            c.ChangeID,
+            c.ChangeDescription,
+            c.ChangeType
+        FROM {releases_table} r
+        LEFT JOIN {changes_table} c ON c.ReleaseID = r.ReleaseID
+        ORDER BY r.ReleaseDate DESC, r.ReleaseID DESC, c.ChangeID ASC
+    """)
+
+    with engine.connect() as connection:
+        rows = connection.execute(query).fetchall()
+
+    releases: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        release_id = row.ReleaseID
+        if release_id not in releases:
+            releases[release_id] = {
+                "ReleaseID": release_id,
+                "ReleaseNumber": row.ReleaseNumber,
+                "ReleaseDate": row.ReleaseDate,
+                "Description": row.Description,
+                "Component": component,
+                "Changes": [],
+            }
+        if row.ChangeID is not None:
+            releases[release_id]["Changes"].append({
+                "ChangeID": row.ChangeID,
+                "ChangeDescription": row.ChangeDescription,
+                "ChangeType": row.ChangeType,
+            })
+
+    return list(releases.values())
+
 app = FastAPI()
 
 app.add_middleware(
@@ -216,6 +265,20 @@ def get_partners(
             return format_result(results)
     except Exception as e:
         logger.error(f"Error in get_partners: {e}")
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@app.get("/GetReleases")
+def get_releases(
+    component: str = Query(..., description="Component to fetch releases for: fe, mw, be")
+) -> List[Dict[str, Any]]:
+    try:
+        normalized_component = component.strip().lower()
+        return fetch_releases(normalized_component)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_releases: {e}")
         raise HTTPException(status_code=500, detail="Query failed")
 
 
