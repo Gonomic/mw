@@ -3,9 +3,12 @@ import logging
 from datetime import datetime, date
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text
+
+from auth import verify_sso_token, exchange_authorization_code
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,14 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://localhost:3310"
 ).split(",")
+
+PUBLIC_PATHS = {
+    "/",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/auth/callback",
+}
 
 # Initialize database engine once at startup
 engine = create_engine(
@@ -92,9 +103,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def require_sso_middleware(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return JSONResponse(status_code=401, content={"detail": "Missing token"})
+
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        request.state.user = verify_sso_token(token)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    return await call_next(request)
+
 @app.get("/")
 def read_root() -> Dict[str, str]:
-    return {"Hello visitor": "The Familiez Fastapi api lives!"}
+    return {"message": "Familiez API", "status": "OK"}
+
+@app.post("/auth/callback")
+def oauth_callback(request_data: Dict[str, str]) -> Dict[str, str]:
+    """Exchange OAuth authorization code for JWT token.
+    
+    Expected request body:
+    {
+        "code": "authorization_code_from_oauth",
+        "codeVerifier": "pkce_code_verifier"
+    }
+    """
+    code = request_data.get("code", "").strip()
+    code_verifier = request_data.get("codeVerifier", "").strip()
+    
+    if not code or not code_verifier:
+        raise HTTPException(status_code=400, detail="Missing code or codeVerifier")
+    
+    access_token = exchange_authorization_code(code, code_verifier)
+    return {"access_token": access_token}
 
 @app.get("/pingAPI")
 def ping_api(timestampFE: datetime) -> List[Dict[str, str]]:
