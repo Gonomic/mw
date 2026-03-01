@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import subprocess
 from typing import Any, Dict, Optional
 
 import jwt
@@ -12,10 +13,18 @@ logger = logging.getLogger(__name__)
 _DISCOVERY_CACHE: Dict[str, Any] = {}
 _JWKS_CACHE: Dict[str, Any] = {}
 
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+ROLE_NONE = "none"
+
 
 def _get_env_bool(name: str, default: str = "true") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _get_env_int(name: str, default: str) -> int:
+    return int(os.getenv(name, default).strip())
 
 
 def _get_discovery_url() -> str:
@@ -145,6 +154,120 @@ def _extract_bearer_token(request: Request) -> str:
     if not auth_header.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
     return auth_header.split(" ", 1)[1].strip()
+
+
+def _extract_username_from_claims(claims: Dict[str, Any]) -> str:
+    username = (
+        claims.get("preferred_username")
+        or claims.get("username")
+        or claims.get("user_name")
+        or claims.get("sub")
+        or ""
+    )
+    return str(username).strip()
+
+
+def _run_ldap_group_check(member_dn: str, group_dn: str) -> bool:
+    ldap_url = os.getenv("SYNOLOGY_LDAP_URL", "").strip()
+    bind_dn = os.getenv("SYNOLOGY_LDAP_BIND_DN", "").strip()
+    bind_password = os.getenv("SYNOLOGY_LDAP_BIND_PASSWORD", "").strip()
+
+    if not ldap_url or not bind_dn or not bind_password:
+        logger.warning("LDAP config incomplete: set SYNOLOGY_LDAP_URL, SYNOLOGY_LDAP_BIND_DN, and SYNOLOGY_LDAP_BIND_PASSWORD")
+        return False
+
+    timeout_seconds = _get_env_int("SYNOLOGY_LDAP_TIMEOUT", "8")
+    ldaptls_reqcert = os.getenv("SYNOLOGY_LDAPTLS_REQCERT", "never").strip()
+
+    cmd = [
+        "ldapsearch",
+        "-LLL",
+        "-x",
+        "-H",
+        ldap_url,
+        "-D",
+        bind_dn,
+        "-w",
+        bind_password,
+        "-b",
+        group_dn,
+        f"(member={member_dn})",
+        "dn",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env={**os.environ, "LDAPTLS_REQCERT": ldaptls_reqcert},
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("LDAP query failed for group %s: %s", group_dn, exc)
+        return False
+
+    if result.returncode != 0:
+        combined_error = f"{result.stdout}\n{result.stderr}".lower()
+        if "no such object" in combined_error:
+            return False
+        logger.warning("LDAP query returned code %s for group %s", result.returncode, group_dn)
+        return False
+
+    output = result.stdout.strip().lower()
+    return output.startswith("dn:") or "\ndn:" in output
+
+
+def get_user_ldap_role(username: str) -> Dict[str, Any]:
+    username_value = (username or "").strip()
+    if not username_value:
+        return {
+            "username": "",
+            "role": ROLE_NONE,
+            "is_admin": False,
+            "is_user": False,
+            "groups": [],
+        }
+
+    member_dn_template = os.getenv(
+        "SYNOLOGY_LDAP_MEMBER_DN_TEMPLATE",
+        "uid={username},cn=users,dc=dekknet,dc=com",
+    )
+    member_dn = member_dn_template.format(username=username_value)
+
+    admin_group_dn = os.getenv(
+        "SYNOLOGY_LDAP_GROUP_ADMIN_DN",
+        "cn=Familiez_Admin,cn=groups,dc=dekknet,dc=com",
+    )
+    user_group_dn = os.getenv(
+        "SYNOLOGY_LDAP_GROUP_USER_DN",
+        "cn=Familiez_Users,cn=groups,dc=dekknet,dc=com",
+    )
+
+    is_admin = _run_ldap_group_check(member_dn, admin_group_dn)
+    is_user = _run_ldap_group_check(member_dn, user_group_dn)
+
+    groups = []
+    if is_admin:
+        groups.append("Familiez_Admin")
+    if is_user:
+        groups.append("Familiez_Users")
+
+    role = ROLE_ADMIN if is_admin else ROLE_USER if is_user else ROLE_NONE
+
+    return {
+        "username": username_value,
+        "role": role,
+        "is_admin": is_admin,
+        "is_user": is_user,
+        "groups": groups,
+    }
+
+
+def resolve_ldap_role_from_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
+    username = _extract_username_from_claims(claims)
+    return get_user_ldap_role(username)
 
 
 def require_sso_auth(request: Request) -> Dict[str, Any]:

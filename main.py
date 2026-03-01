@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text
 
-from auth import verify_sso_token, exchange_authorization_code
+from auth import verify_sso_token, exchange_authorization_code, resolve_ldap_role_from_claims
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,9 @@ async def require_sso_middleware(request: Request, call_next):
 
     token = auth_header.split(" ", 1)[1].strip()
     try:
-        request.state.user = verify_sso_token(token)
+        claims = verify_sso_token(token)
+        request.state.user = claims
+        request.state.user_access = resolve_ldap_role_from_claims(claims)
     except HTTPException as exc:
         logger.warning(f"[Auth] Token validation failed for {request.url.path}: {exc.detail}")
         return create_cors_json_response(exc.status_code, {"detail": exc.detail}, origin)
@@ -191,6 +193,19 @@ def oauth_callback(request_data: Dict[str, str]) -> Dict[str, str]:
     except Exception as e:
         logger.error(f"Unexpected error during token exchange: {e}")
         raise HTTPException(status_code=500, detail="Token exchange failed")
+
+
+@app.get("/auth/me")
+def get_authenticated_user(request: Request) -> Dict[str, Any]:
+    claims = getattr(request.state, "user", {}) or {}
+    access = getattr(request.state, "user_access", {}) or {}
+    return {
+        "username": access.get("username") or claims.get("preferred_username") or claims.get("username") or claims.get("sub") or "",
+        "role": access.get("role", "none"),
+        "groups": access.get("groups", []),
+        "is_admin": bool(access.get("is_admin", False)),
+        "is_user": bool(access.get("is_user", False)),
+    }
 
 @app.get("/pingAPI")
 def ping_api(timestampFE: datetime) -> List[Dict[str, str]]:
