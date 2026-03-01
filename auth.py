@@ -1,11 +1,11 @@
 import os
 import time
 import logging
-import subprocess
 from typing import Any, Dict, Optional
 
 import jwt
 import requests
+from ldap3 import Server, Connection, ALL, BASE
 from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
@@ -134,12 +134,14 @@ def verify_sso_token(token: str) -> Dict[str, Any]:
         )
 
     try:
+        leeway_seconds = _get_env_int("SYNOLOGY_JWT_LEEWAY", "120")
         payload = jwt.decode(
             token,
             public_key,
             algorithms=[unverified_header.get("alg", "RS256")],
             audience=audience,
             issuer=issuer,
+            leeway=leeway_seconds,
         )
         return payload
     except jwt.ExpiredSignatureError:
@@ -168,6 +170,7 @@ def _extract_username_from_claims(claims: Dict[str, Any]) -> str:
 
 
 def _run_ldap_group_check(member_dn: str, group_dn: str) -> bool:
+    """Check if a user (identified by member_dn) is member of a group using ldap3."""
     ldap_url = os.getenv("SYNOLOGY_LDAP_URL", "").strip()
     bind_dn = os.getenv("SYNOLOGY_LDAP_BIND_DN", "").strip()
     bind_password = os.getenv("SYNOLOGY_LDAP_BIND_PASSWORD", "").strip()
@@ -177,46 +180,37 @@ def _run_ldap_group_check(member_dn: str, group_dn: str) -> bool:
         return False
 
     timeout_seconds = _get_env_int("SYNOLOGY_LDAP_TIMEOUT", "8")
-    ldaptls_reqcert = os.getenv("SYNOLOGY_LDAPTLS_REQCERT", "never").strip()
-
-    cmd = [
-        "ldapsearch",
-        "-LLL",
-        "-x",
-        "-H",
-        ldap_url,
-        "-D",
-        bind_dn,
-        "-w",
-        bind_password,
-        "-b",
-        group_dn,
-        f"(member={member_dn})",
-        "dn",
-    ]
-
+    
+    # ldap3 doesn't validate SSL by default for self-signed certs
+    # Create server with get_info=ALL for better debugging
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env={**os.environ, "LDAPTLS_REQCERT": ldaptls_reqcert},
-            check=False,
+        server = Server(ldap_url, get_info=ALL, connect_timeout=timeout_seconds)
+        conn = Connection(
+            server,
+            user=bind_dn,
+            password=bind_password,
+            auto_bind=True,
+            receive_timeout=timeout_seconds
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
+        
+        # Search for the member within the group object itself
+        search_filter = f"(member={member_dn})"
+        conn.search(
+            search_base=group_dn,
+            search_filter=search_filter,
+            search_scope=BASE,
+            attributes=["member"],
+        )
+        
+        # If we got results, the member is in the group
+        is_member = len(conn.entries) > 0
+        conn.unbind()
+        
+        return is_member
+        
+    except Exception as exc:
         logger.warning("LDAP query failed for group %s: %s", group_dn, exc)
         return False
-
-    if result.returncode != 0:
-        combined_error = f"{result.stdout}\n{result.stderr}".lower()
-        if "no such object" in combined_error:
-            return False
-        logger.warning("LDAP query returned code %s for group %s", result.returncode, group_dn)
-        return False
-
-    output = result.stdout.strip().lower()
-    return output.startswith("dn:") or "\ndn:" in output
 
 
 def get_user_ldap_role(username: str) -> Dict[str, Any]:
@@ -350,4 +344,27 @@ def exchange_authorization_code(code: str, code_verifier: str = "") -> str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token exchange failed",
+        )
+
+def require_admin_role(request: Request) -> None:
+    """
+    Helper function to check if the authenticated user has admin role.
+    Raises HTTPException with 403 Forbidden if user is not admin.
+    
+    Use in endpoints:
+        @app.post("/SomeWriteOp")
+        def some_endpoint(request: Request, data: dict):
+            require_admin_role(request)  # Add this line
+            # ... rest of endpoint code ...
+    """
+    user_access = getattr(request.state, "user_access", {}) or {}
+    is_admin = user_access.get("is_admin", False)
+    
+    if not is_admin:
+        username = user_access.get("username", "unknown")
+        role = user_access.get("role", "none")
+        logger.warning(f"Access denied: user '{username}' with role '{role}' attempted write operation")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied. Only admins can perform this operation (current role: {role})"
         )

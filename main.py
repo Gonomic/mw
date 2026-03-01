@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text
 
-from auth import verify_sso_token, exchange_authorization_code, resolve_ldap_role_from_claims
+from auth import verify_sso_token, exchange_authorization_code, resolve_ldap_role_from_claims, require_admin_role
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +446,12 @@ def get_possible_partners_based_on_age(
 
 @app.post("/UpdatePerson")
 def update_person(
+    request: Request,
     person_data: Dict[str, Any]
 ) -> Dict[str, Any]:
+    # Check if user has admin role
+    require_admin_role(request)
+    
     try:
         with engine.connect() as connection:
             person_id = person_data.get('personId')
@@ -489,8 +493,12 @@ def update_person(
 
 @app.post("/AddPerson")
 def add_person(
+    request: Request,
     person_data: Dict[str, Any]
 ) -> Dict[str, Any]:
+    # Check if user has admin role
+    require_admin_role(request)
+    
     try:
         with engine.connect() as connection:
             full_name = f"{person_data.get('PersonGivvenName', '')} {person_data.get('PersonFamilyName', '')}".strip()
@@ -592,8 +600,12 @@ def add_person(
 
 @app.post("/DeletePerson")
 def delete_person(
+    request: Request,
     person_data: Dict[str, Any]
 ) -> Dict[str, Any]:
+    # Check if user has admin role
+    require_admin_role(request)
+    
     try:
         with engine.connect() as connection:
             person_id = person_data.get('personId')
