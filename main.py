@@ -7,6 +7,10 @@ from fastapi import FastAPI, Query, HTTPException, Request, UploadFile, File, Fo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy import create_engine, text
+from PIL import Image
+import io
+import json
+from pathlib import Path
 
 from auth import verify_sso_token, exchange_authorization_code, resolve_ldap_role_from_claims, require_admin_role
 from file_utils import (
@@ -718,30 +722,135 @@ async def upload_file(
     Returns:
         Dict with file_id and success status
     """
-    # Note: Implementation will be completed in next steps
-    # This is the endpoint structure for step 1
-    logger.info(f"File upload requested: scope={scope}, entity_id={entity_id}, type={document_type}")
-    
-    # Check file size
-    contents = await file.read()
-    if len(contents) > MAX_FILE_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum size is {MAX_FILE_UPLOAD_SIZE} bytes"
-        )
-    
-    # Reset file position for potential re-reading
-    await file.seek(0)
-    
-    return {
-        "success": True,
-        "message": "Upload endpoint ready (implementation pending database setup)",
-        "file_name": file.filename,
-        "file_size": len(contents),
-        "scope": scope,
-        "entity_id": entity_id,
-        "document_type": document_type
-    }
+    try:
+        logger.info(f"File upload: scope={scope}, entity={entity_id}, type={document_type}, filename={file.filename}")
+        
+        # Read file contents
+        contents = await file.read()
+        file_size = len(contents)
+        
+        # Check file size
+        if file_size > MAX_FILE_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_FILE_UPLOAD_SIZE} bytes"
+            )
+        
+        # Parse person_data if provided
+        names_data = json.loads(person_data) if person_data else {}
+        
+        # Determine file extension
+        original_filename = file.filename or "unknown"
+        file_ext = Path(original_filename).suffix.lstrip('.') or 'bin'
+        
+        # Get MIME type
+        mime_type = file.content_type or 'application/octet-stream'
+        
+        # Generate storage path and filename based on scope
+        base_path = STORAGE_BASE_PATH
+        
+        if scope == "person":
+            person_id = int(entity_id)
+            first_name = names_data.get('first_name', 'unknown')
+            last_name = names_data.get('last_name', 'unknown')
+            
+            storage_dir = get_person_path(base_path, person_id, first_name, last_name)
+            filename = generate_filename(person_id, document_type, year, file_ext)
+            
+        elif scope == "family":
+            # entity_id format: "father_id_mother_id"
+            parts = entity_id.split('_')
+            if len(parts) != 2:
+                raise HTTPException(status_code=400, detail="Invalid family entity_id format")
+            
+            father_id = int(parts[0])
+            mother_id = int(parts[1])
+            
+            father_first = names_data.get('father_first_name', 'unknown')
+            father_last = names_data.get('father_last_name', 'unknown')
+            mother_first = names_data.get('mother_first_name', 'unknown')
+            mother_last = names_data.get('mother_last_name', 'unknown')
+            
+            storage_dir = get_family_path(
+                base_path, father_id, father_first, father_last,
+                mother_id, mother_first, mother_last
+            )
+            family_id = f"{father_id}_{mother_id}"
+            filename = generate_filename(family_id, document_type, year, file_ext)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid scope. Must be 'person' or 'family'")
+        
+        # Ensure directory exists
+        ensure_directory_exists(storage_dir)
+        
+        # Full file path
+        file_path = storage_dir / filename
+        relative_path = str(file_path.relative_to(base_path))
+        
+        # Write file to disk
+        with open(file_path, 'wb') as f:
+            f.write(contents)
+        
+        logger.info(f"File written to disk: {file_path}")
+        
+        # Get username for uploaded_by
+        user_claims = getattr(request.state, 'user', {})
+        uploaded_by = user_claims.get('preferred_username') or user_claims.get('sub', 'unknown')
+        
+        # Insert metadata into database
+        with engine.connect() as conn:
+            # Insert into files table
+            result = conn.execute(
+                text("""
+                    INSERT INTO files 
+                    (FilePath, FileName, OriginalFileName, DocumentType, Year, FileSize, MimeType, UploadedBy)
+                    VALUES (:path, :filename, :original, :doctype, :year, :size, :mime, :uploaded_by)
+                """),
+                {
+                    'path': relative_path,
+                    'filename': filename,
+                    'original': original_filename,
+                    'doctype': document_type,
+                    'year': year if year else None,
+                    'size': file_size,
+                    'mime': mime_type,
+                    'uploaded_by': uploaded_by
+                }
+            )
+            file_id = result.lastrowid
+            
+            # Create appropriate link
+            if scope == "person":
+                conn.execute(
+                    text("INSERT INTO person_files (PersonID, FileID) VALUES (:person_id, :file_id)"),
+                    {'person_id': person_id, 'file_id': file_id}
+                )
+            else:  # family
+                conn.execute(
+                    text("INSERT INTO family_files (FatherID, MotherID, FileID) VALUES (:father_id, :mother_id, :file_id)"),
+                    {'father_id': father_id, 'mother_id': mother_id, 'file_id': file_id}
+                )
+            
+            conn.commit()
+        
+        logger.info(f"File metadata saved to database: file_id={file_id}")
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": filename,
+            "original_filename": original_filename,
+            "file_size": file_size,
+            "mime_type": mime_type,
+            "document_type": document_type,
+            "year": year
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 @app.get("/api/files/{file_id}")
@@ -753,17 +862,50 @@ async def download_file(request: Request, file_id: int) -> FileResponse:
         file_id: Unique file identifier
         
     Returns:
-        Streaming file response
+        File response with appropriate headers
     """
-    # Note: Implementation will be completed in next steps
-    logger.info(f"File download requested: file_id={file_id}")
-    raise HTTPException(status_code=501, detail="Download endpoint pending database implementation")
+    try:
+        # Get file metadata from database
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT FilePath, FileName, OriginalFileName, MimeType FROM files WHERE FileID = :file_id"),
+                {'file_id': file_id}
+            ).fetchone()
+            
+            if not result:
+                raise HTTPException(status_code=404, detail="File not found")
+            
+            file_path_rel = result.FilePath
+            filename = result.FileName
+            original_filename = result.OriginalFileName or filename
+            mime_type = result.MimeType or 'application/octet-stream'
+        
+        # Build full path
+        full_path = Path(STORAGE_BASE_PATH) / file_path_rel
+        
+        if not full_path.exists():
+            logger.error(f"File not found on disk: {full_path}")
+            raise HTTPException(status_code=404, detail="File not found on disk")
+        
+        # Return file
+        return FileResponse(
+            path=str(full_path),
+            filename=original_filename,
+            media_type=mime_type
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading file {file_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Download failed")
 
 
 @app.get("/api/files/{file_id}/thumbnail")
 async def get_file_thumbnail(request: Request, file_id: int) -> StreamingResponse:
     """
     Get a thumbnail for an image file.
+    Generates 200x200px thumbnail on-the-fly.
     
     Args:
         file_id: Unique file identifier
@@ -771,9 +913,66 @@ async def get_file_thumbnail(request: Request, file_id: int) -> StreamingRespons
     Returns:
         Thumbnail image as streaming response
     """
-    # Note: Implementation will be completed in next steps
-    logger.info(f"Thumbnail requested: file_id={file_id}")
-    raise HTTPException(status_code=501, detail="Thumbnail endpoint pending implementation")
+    try:
+        # Get file metadata from database
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT FilePath, MimeType FROM files WHERE FileID = :file_id"),
+                {'file_id': file_id}
+            ).fetchone()
+            
+            if not result:
+                raise HTTPException(status_code=404, detail="File not found")
+            
+            file_path_rel = result.FilePath
+            mime_type = result.MimeType or 'application/octet-stream'
+        
+        # Check if it's an image
+        if not mime_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File is not an image")
+        
+        # Build full path
+        full_path = Path(STORAGE_BASE_PATH) / file_path_rel
+        
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="File not found on disk")
+        
+        # Generate thumbnail
+        try:
+            with Image.open(full_path) as img:
+                # Convert to RGB if necessary (for PNG with transparency, etc.)
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    # Create white background
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'P':
+                        img = img.convert('RGBA')
+                    background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Create thumbnail (maintains aspect ratio)
+                img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                
+                # Save to bytes
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG', quality=85)
+                img_byte_arr.seek(0)
+                
+                return StreamingResponse(
+                    img_byte_arr,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=31536000"}  # Cache for 1 year
+                )
+        except Exception as img_error:
+            logger.error(f"Error generating thumbnail for file {file_id}: {img_error}")
+            raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting thumbnail for file {file_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Thumbnail generation failed")
 
 
 @app.get("/api/person/{person_id}/files")
@@ -787,9 +986,40 @@ async def get_person_files(request: Request, person_id: int) -> List[Dict[str, A
     Returns:
         List of file metadata dictionaries
     """
-    # Note: Implementation will be completed in next steps
-    logger.info(f"Person files requested: person_id={person_id}")
-    return []
+    try:
+        with engine.connect() as conn:
+            results = conn.execute(
+                text("""
+                    SELECT 
+                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
+                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
+                    FROM files f
+                    INNER JOIN person_files pf ON f.FileID = pf.FileID
+                    WHERE pf.PersonID = :person_id
+                    ORDER BY f.CreatedAt DESC
+                """),
+                {'person_id': person_id}
+            ).fetchall()
+            
+            files = []
+            for row in results:
+                files.append({
+                    'file_id': row.FileID,
+                    'filename': row.FileName,
+                    'original_filename': row.OriginalFileName,
+                    'document_type': row.DocumentType,
+                    'year': row.Year,
+                    'file_size': row.FileSize,
+                    'mime_type': row.MimeType,
+                    'created_at': row.CreatedAt.isoformat() if row.CreatedAt else None,
+                    'uploaded_by': row.UploadedBy
+                })
+            
+            return files
+            
+    except Exception as e:
+        logger.error(f"Error getting person files for person {person_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve files")
 
 
 @app.get("/api/family/{father_id}/{mother_id}/files")
@@ -808,7 +1038,38 @@ async def get_family_files(
     Returns:
         List of file metadata dictionaries
     """
-    # Note: Implementation will be completed in next steps
-    logger.info(f"Family files requested: father_id={father_id}, mother_id={mother_id}")
-    return []
+    try:
+        with engine.connect() as conn:
+            results = conn.execute(
+                text("""
+                    SELECT 
+                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
+                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
+                    FROM files f
+                    INNER JOIN family_files ff ON f.FileID = ff.FileID
+                    WHERE ff.FatherID = :father_id AND ff.MotherID = :mother_id
+                    ORDER BY f.CreatedAt DESC
+                """),
+                {'father_id': father_id, 'mother_id': mother_id}
+            ).fetchall()
+            
+            files = []
+            for row in results:
+                files.append({
+                    'file_id': row.FileID,
+                    'filename': row.FileName,
+                    'original_filename': row.OriginalFileName,
+                    'document_type': row.DocumentType,
+                    'year': row.Year,
+                    'file_size': row.FileSize,
+                    'mime_type': row.MimeType,
+                    'created_at': row.CreatedAt.isoformat() if row.CreatedAt else None,
+                    'uploaded_by': row.UploadedBy
+                })
+            
+            return files
+            
+    except Exception as e:
+        logger.error(f"Error getting family files for family {father_id}/{mother_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve files")
 
