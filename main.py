@@ -3,12 +3,20 @@ import logging
 from datetime import datetime, date
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi import FastAPI, Query, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy import create_engine, text
 
 from auth import verify_sso_token, exchange_authorization_code, resolve_ldap_role_from_claims, require_admin_role
+from file_utils import (
+    slugify,
+    generate_filename,
+    get_person_path,
+    get_family_path,
+    ensure_directory_exists,
+    get_storage_base_path
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +29,14 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://localhost:3310"
 ).split(",")
+
+# File storage configuration
+STORAGE_ENVIRONMENT = os.getenv("STORAGE_ENVIRONMENT", "development")
+STORAGE_BASE_PATH = os.getenv(
+    "STORAGE_BASE_PATH",
+    "/home/frans/Documenten/Dev/Familiez/BESTANDEN"
+)
+MAX_FILE_UPLOAD_SIZE = int(os.getenv("MAX_FILE_UPLOAD_SIZE", "52428800"))  # 50MB default
 
 PUBLIC_PATHS = {
     "/",
@@ -668,4 +684,131 @@ def delete_person(
             "success": False, 
             "error": f"Verwijdering mislukt: {error_msg[:80]}"
         }
+
+
+# ============================================================================
+# FILE MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post("/api/files/upload")
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    scope: str = Form(...),  # "person" or "family"
+    entity_id: str = Form(...),  # person_id or "father_id_mother_id"
+    document_type: str = Form(...),
+    year: int = Form(None),
+    person_data: str = Form(None)  # JSON string with name info
+) -> Dict[str, Any]:
+    """
+    Upload a file and store it with metadata.
+    
+    Scope determines storage location:
+    - "person": stored in person-specific directory
+    - "family": stored in family-specific directory
+    
+    Args:
+        file: Uploaded file
+        scope: Either "person" or "family"
+        entity_id: Person ID or "father_id_mother_id" for family
+        document_type: Type of document (e.g., 'portret', 'geboorteakte')
+        year: Optional year associated with the document
+        person_data: JSON string with name information for path generation
+        
+    Returns:
+        Dict with file_id and success status
+    """
+    # Note: Implementation will be completed in next steps
+    # This is the endpoint structure for step 1
+    logger.info(f"File upload requested: scope={scope}, entity_id={entity_id}, type={document_type}")
+    
+    # Check file size
+    contents = await file.read()
+    if len(contents) > MAX_FILE_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_FILE_UPLOAD_SIZE} bytes"
+        )
+    
+    # Reset file position for potential re-reading
+    await file.seek(0)
+    
+    return {
+        "success": True,
+        "message": "Upload endpoint ready (implementation pending database setup)",
+        "file_name": file.filename,
+        "file_size": len(contents),
+        "scope": scope,
+        "entity_id": entity_id,
+        "document_type": document_type
+    }
+
+
+@app.get("/api/files/{file_id}")
+async def download_file(request: Request, file_id: int) -> FileResponse:
+    """
+    Download a file by its ID.
+    
+    Args:
+        file_id: Unique file identifier
+        
+    Returns:
+        Streaming file response
+    """
+    # Note: Implementation will be completed in next steps
+    logger.info(f"File download requested: file_id={file_id}")
+    raise HTTPException(status_code=501, detail="Download endpoint pending database implementation")
+
+
+@app.get("/api/files/{file_id}/thumbnail")
+async def get_file_thumbnail(request: Request, file_id: int) -> StreamingResponse:
+    """
+    Get a thumbnail for an image file.
+    
+    Args:
+        file_id: Unique file identifier
+        
+    Returns:
+        Thumbnail image as streaming response
+    """
+    # Note: Implementation will be completed in next steps
+    logger.info(f"Thumbnail requested: file_id={file_id}")
+    raise HTTPException(status_code=501, detail="Thumbnail endpoint pending implementation")
+
+
+@app.get("/api/person/{person_id}/files")
+async def get_person_files(request: Request, person_id: int) -> List[Dict[str, Any]]:
+    """
+    Get all files associated with a person.
+    
+    Args:
+        person_id: Unique person identifier
+        
+    Returns:
+        List of file metadata dictionaries
+    """
+    # Note: Implementation will be completed in next steps
+    logger.info(f"Person files requested: person_id={person_id}")
+    return []
+
+
+@app.get("/api/family/{father_id}/{mother_id}/files")
+async def get_family_files(
+    request: Request,
+    father_id: int,
+    mother_id: int
+) -> List[Dict[str, Any]]:
+    """
+    Get all files associated with a family (parent couple).
+    
+    Args:
+        father_id: Father's person ID
+        mother_id: Mother's person ID
+        
+    Returns:
+        List of file metadata dictionaries
+    """
+    # Note: Implementation will be completed in next steps
+    logger.info(f"Family files requested: father_id={father_id}, mother_id={mother_id}")
+    return []
 
