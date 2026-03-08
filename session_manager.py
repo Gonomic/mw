@@ -29,9 +29,7 @@ CLEANUP_INTERVAL_MINUTES = 60  # How often to clean expired sessions
 def _is_enabled() -> bool:
     """Check if server-side sessions are enabled via .env"""
     value = os.getenv("USE_SERVER_SESSIONS", "false").strip().lower()
-    enabled = value in {"1", "true", "yes", "on"}
-    logger.warning(f"[Sessions DEBUG] USE_SERVER_SESSIONS='{value}' -> enabled={enabled}")
-    return enabled
+    return value in {"1", "true", "yes", "on"}
 
 
 def create_session(user_info: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
@@ -44,10 +42,7 @@ def create_session(user_info: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
     Returns:
         Tuple of (session_id, cookie_dict) where cookie_dict is for FastAPI response
     """
-    logger.warning(f"[Sessions DEBUG] create_session called for user {user_info.get('username')}")
-    
     if not _is_enabled():
-        logger.warning("[Sessions DEBUG] Sessions NOT enabled, returning empty session")
         return "", {}
     
     _cleanup_expired_sessions()

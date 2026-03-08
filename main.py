@@ -257,8 +257,6 @@ def oauth_callback(request_data: Dict[str, str]) -> Dict[str, str]:
         if session_id:
             logger.info(f"Setting session cookie for user {user_access.get('username')}")
             response.set_cookie(**cookie_config)
-        else:
-            logger.warning(f"[Sessions DEBUG] No session created for user {user_access.get('username')} - sessions disabled?")
         
         return response
     except HTTPException:
