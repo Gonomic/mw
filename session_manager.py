@@ -62,13 +62,15 @@ def create_session(user_info: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
     logger.info(f"[Sessions] Created session {session_id[:8]}... for user {username}")
     
     # Return cookie configuration for FastAPI set_cookie()
+    # Use SameSite=None for production (cross-site) and Lax for dev (same-site)
+    is_prod = _is_production()
     cookie_config = {
         "key": "familiez_session",
         "value": session_id,
         "max_age": SESSION_LIFETIME_HOURS * 3600,
         "httponly": True,
-        "secure": _is_production(),
-        "samesite": "Lax",
+        "secure": is_prod,
+        "samesite": "None" if is_prod else "Lax",
     }
     
     return session_id, cookie_config
