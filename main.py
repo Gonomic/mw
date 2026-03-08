@@ -566,6 +566,30 @@ def update_person(
     try:
         with engine.connect() as connection:
             person_id = person_data.get('personId')
+            
+            # Get current person details for status fields (if not provided)
+            person_result = connection.execute(
+                text("""
+                    SELECT PersonDateOfBirthStatus, PersonDateOfDeathStatus
+                    FROM persons
+                    WHERE PersonID = :personId
+                """),
+                {"personId": person_id}
+            ).fetchone()
+            
+            if not person_result:
+                return {"success": False, "error": "Persoon niet gevonden"}
+            
+            birth_status = person_result[0] if person_result[0] is not None else 0
+            death_status = person_result[1] if person_result[1] is not None else 0
+            
+            # Use relation IDs from request (frontend now sends these)
+            person_is_male = person_data.get('PersonIsMale')
+            mother_id = person_data.get('MotherId')
+            father_id = person_data.get('FatherId')
+            partner_id = person_data.get('PartnerId')
+            
+            # Call ChangePerson with all 13 parameters
             results_proxy = connection.execute(
                 text("""call ChangePerson(
                     :personId, 
@@ -574,7 +598,13 @@ def update_person(
                     :dateOfBirth,
                     :placeOfBirth,
                     :dateOfDeath,
-                    :placeOfDeath
+                    :placeOfDeath,
+                    :isMale,
+                    :motherId,
+                    :fatherId,
+                    :partnerId,
+                    :birthStatus,
+                    :deathStatus
                 )"""),
                 {
                     "personId": person_id,
@@ -583,7 +613,13 @@ def update_person(
                     "dateOfBirth": person_data.get('PersonDateOfBirth'),
                     "placeOfBirth": person_data.get('PersonPlaceOfBirth'),
                     "dateOfDeath": person_data.get('PersonDateOfDeath'),
-                    "placeOfDeath": person_data.get('PersonPlaceOfDeath')
+                    "placeOfDeath": person_data.get('PersonPlaceOfDeath'),
+                    "isMale": person_is_male,
+                    "motherId": mother_id,
+                    "fatherId": father_id,
+                    "partnerId": partner_id,
+                    "birthStatus": birth_status,
+                    "deathStatus": death_status
                 }
             )
             results = results_proxy.fetchall()
