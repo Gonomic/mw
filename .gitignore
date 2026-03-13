@@ -38,6 +38,12 @@ wheels/
 *~
 .DS_Store
 
+# SQLTools
+.sqltools/
+.sqltoolsrc
+.vscode/sqltools.*
+.vscode/*sqltools*
+
 # Testing
 .pytest_cache/
 .coverage
@@ -49,3 +55,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# SQL session exports
+*.session.sql

@@ -20,6 +20,10 @@ pytest.ini
 .git/
 .gitignore
 .vscode/
+.sqltools/
+.sqltoolsrc
+.vscode/sqltools.*
+.vscode/*sqltools*
 .env
 .env.local
 .env.example
