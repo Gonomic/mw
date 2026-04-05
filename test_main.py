@@ -624,3 +624,83 @@ class TestUploadFileEndpoint:
         assert response.status_code == 500
         assert 'Upload failed' in response.json()['detail']
         assert files_on_disk == []
+
+
+class TestPersonWriteEndpoints:
+    """Test suite for person write endpoints migrated away from inline SQL."""
+
+    @patch('main.require_admin_role')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_update_person_calls_changeperson_v2_without_preselect(self, mock_engine, mock_verify_sso_token, mock_require_admin_role):
+        """UpdatePerson should call ChangePerson_v2 directly without a preliminary SELECT."""
+        mock_require_admin_role.return_value = None
+        mock_verify_sso_token.return_value = {'sub': 'admin-user'}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        result_row = Mock()
+        result_row._asdict.return_value = {'CompletedOk': 0}
+        mock_connection.execute.return_value.fetchall.return_value = [result_row]
+
+        response = client.post(
+            '/UpdatePerson',
+            headers={'Authorization': 'Bearer valid-test-token'},
+            json={
+                'personId': 12,
+                'PersonGivvenName': 'Jan',
+                'PersonFamilyName': 'Jansen',
+                'PersonIsMale': 1,
+                'MotherId': None,
+                'FatherId': None,
+                'PartnerId': None,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()['success'] is True
+        assert mock_connection.execute.call_count == 1
+
+        call_args = mock_connection.execute.call_args
+        assert 'ChangePerson_v2' in str(call_args[0][0])
+        assert call_args[0][1]['birthStatus'] is None
+        assert call_args[0][1]['deathStatus'] is None
+
+    @patch('main.require_admin_role')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_add_person_uses_returned_person_id_from_sproc(self, mock_engine, mock_verify_sso_token, mock_require_admin_role):
+        """AddPerson should use PersonID returned by AddPerson_v2 and skip fallback SELECT."""
+        mock_require_admin_role.return_value = None
+        mock_verify_sso_token.return_value = {'sub': 'admin-user'}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        result_row = Mock()
+        result_row._asdict.return_value = {'CompletedOk': 0, 'PersonID': 321}
+        mock_connection.execute.return_value.fetchall.return_value = [result_row]
+
+        response = client.post(
+            '/AddPerson',
+            headers={'Authorization': 'Bearer valid-test-token'},
+            json={
+                'PersonGivvenName': 'Piet',
+                'PersonFamilyName': 'Pieters',
+                'PersonDateOfBirth': '2000-01-01',
+                'PersonIsMale': 1,
+                'MotherId': None,
+                'FatherId': None,
+                'PartnerId': None,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {'success': True, 'personId': 321}
+        assert mock_connection.execute.call_count == 1
+
+        call_args = mock_connection.execute.call_args
+        assert 'AddPerson_v2' in str(call_args[0][0])
+        assert call_args[0][1]['birthStatus'] == 0
+        assert call_args[0][1]['deathStatus'] == 0

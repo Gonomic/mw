@@ -521,22 +521,8 @@ def update_person(
     try:
         with engine.connect() as connection:
             person_id = person_data.get('personId')
-            
-            # Get current person details for status fields (if not provided)
-            person_result = connection.execute(
-                text("""
-                    SELECT PersonDateOfBirthStatus, PersonDateOfDeathStatus
-                    FROM persons
-                    WHERE PersonID = :personId
-                """),
-                {"personId": person_id}
-            ).fetchone()
-            
-            if not person_result:
-                return {"success": False, "error": "Persoon niet gevonden"}
-            
-            birth_status = person_result[0] if person_result[0] is not None else 0
-            death_status = person_result[1] if person_result[1] is not None else 0
+            birth_status = person_data.get('PersonDateOfBirthStatus')
+            death_status = person_data.get('PersonDateOfDeathStatus')
             
             # Use relation IDs from request (frontend now sends these)
             person_is_male = person_data.get('PersonIsMale')
@@ -544,9 +530,9 @@ def update_person(
             father_id = person_data.get('FatherId')
             partner_id = person_data.get('PartnerId')
             
-            # Call ChangePerson with all 13 parameters
+            # Call ChangePerson_v2 so the DB keeps existing status values when not provided.
             results_proxy = connection.execute(
-                text("""call ChangePerson(
+                text("""call ChangePerson_v2(
                     :personId, 
                     :givvenName, 
                     :familyName, 
@@ -603,14 +589,12 @@ def add_person(
     
     try:
         with engine.connect() as connection:
-            full_name = f"{person_data.get('PersonGivvenName', '')} {person_data.get('PersonFamilyName', '')}".strip()
-
             is_male = person_data.get('PersonIsMale')
             
-            # Call AddPerson procedure
+            # Call AddPerson_v2 so the new PersonID is returned in the first result set.
             try:
                 results_proxy = connection.execute(
-                    text("""call AddPerson(
+                    text("""call AddPerson_v2(
                         NULL,
                         :givvenName, 
                         :familyName, 
@@ -622,8 +606,8 @@ def add_person(
                         :motherId,
                         :fatherId,
                         :partnerId,
-                        0,
-                        0
+                        :birthStatus,
+                        :deathStatus
                     )"""),
                     {
                         "givvenName": person_data.get('PersonGivvenName', ''),
@@ -636,6 +620,8 @@ def add_person(
                         "motherId": person_data.get('MotherId') or None,
                         "fatherId": person_data.get('FatherId') or None,
                         "partnerId": person_data.get('PartnerId') or None,
+                        "birthStatus": person_data.get('PersonDateOfBirthStatus', 0),
+                        "deathStatus": person_data.get('PersonDateOfDeathStatus', 0),
                     }
                 )
                 results = results_proxy.fetchall()
@@ -648,6 +634,13 @@ def add_person(
                         logger.error(f"AddPerson procedure failed with CompletedOk={result_dict.get('CompletedOk')}")
                         connection.rollback()
                         return {"success": False, "error": "Database procedure mislukt"}
+
+                    if 'PersonID' in result_dict and result_dict.get('PersonID') is not None:
+                        connection.commit()
+                        return {
+                            "success": True,
+                            "personId": result_dict.get('PersonID')
+                        }
                 
                 connection.commit()
                 
@@ -661,31 +654,8 @@ def add_person(
                     return {"success": False, "error": "Vader/Moeder ID niet gevonden"}
                 return {"success": False, "error": f"Database fout: {error_msg[:50]}"}
             
-            # Now fetch the inserted person by name and other details
-            select_results = connection.execute(
-                text("""
-                    SELECT PersonID, PersonGivvenName, PersonFamilyName, PersonDateOfBirth, 
-                           PersonPlaceOfBirth, PersonDateOfDeath, PersonPlaceOfDeath, PersonIsMale
-                    FROM persons 
-                    WHERE PersonGivvenName = :givvenName AND PersonFamilyName = :familyName
-                    ORDER BY PersonID DESC
-                    LIMIT 1
-                """),
-                {
-                    "givvenName": person_data.get('PersonGivvenName', ''),
-                    "familyName": person_data.get('PersonFamilyName', '')
-                }
-            ).fetchall()
-            
-            if select_results and len(select_results) > 0:
-                person_dict = select_results[0]._asdict() if hasattr(select_results[0], '_asdict') else dict(select_results[0])
-                return {
-                    "success": True, 
-                    "personId": person_dict.get('PersonID')
-                }
-            else:
-                logger.error("Could not find inserted person after AddPerson procedure")
-                return {"success": False, "error": "Persoon opgeslaan maar kon niet worden opgehaald"}
+            logger.error("AddPerson did not return a PersonID in the first result set")
+            return {"success": False, "error": "Persoon opgeslaan maar kon niet worden opgehaald"}
                 
     except Exception as e:
         logger.error(f"Error in add_person: {e}", exc_info=True)
