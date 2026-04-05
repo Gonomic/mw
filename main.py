@@ -87,33 +87,15 @@ def format_result(results: List[Any]) -> List[Dict[str, Any]]:
     result_dicts = [row._asdict() for row in results]
     return [{"numberOfRecords": len(result_dicts)}, *result_dicts]
 
-RELEASE_TABLES = {
-    "fe": ("fe_releases", "fe_release_changes"),
-    "mw": ("mw_releases", "mw_release_changes"),
-    "be": ("be_releases", "be_release_changes"),
-}
-
 def fetch_releases(component: str) -> List[Dict[str, Any]]:
-    if component not in RELEASE_TABLES:
+    if component not in {"fe", "mw", "be"}:
         raise HTTPException(status_code=400, detail="Invalid component. Use fe, mw, or be.")
 
-    releases_table, changes_table = RELEASE_TABLES[component]
-    query = text(f"""
-        SELECT
-            r.ReleaseID,
-            r.ReleaseNumber,
-            DATE_FORMAT(r.ReleaseDate, '%Y-%m-%d %H:%i:%s') AS ReleaseDate,
-            r.Description,
-            c.ChangeID,
-            c.ChangeDescription,
-            c.ChangeType
-        FROM {releases_table} r
-        LEFT JOIN {changes_table} c ON c.ReleaseID = r.ReleaseID
-        ORDER BY r.ReleaseDate DESC, r.ReleaseID DESC, c.ChangeID ASC
-    """)
-
     with engine.connect() as connection:
-        rows = connection.execute(query).fetchall()
+        rows = connection.execute(
+            text("call GetReleasesByComponent(:componentIn)"),
+            {"componentIn": component}
+        ).fetchall()
 
     releases: Dict[int, Dict[str, Any]] = {}
     for row in rows:
@@ -399,22 +381,8 @@ def get_person_details(
 ) -> List[Dict[str, Any]]:
     try:
         with engine.connect() as connection:
-            # Use simple SELECT instead of stored procedure to avoid missing columns
             results_proxy = connection.execute(
-                text("""
-                    SELECT 
-                        PersonID,
-                        PersonGivvenName,
-                        PersonFamilyName,
-                        PersonDateOfBirth,
-                        PersonPlaceOfBirth,
-                        PersonDateOfDeath,
-                        PersonPlaceOfDeath,
-                        PersonIsMale,
-                        DATE_FORMAT(Timestamp,'%Y-%m-%d %T') as Timestamp
-                    FROM persons
-                    WHERE PersonID = :personId
-                """),
+                text("call GetPersonDetails_v2(:personId)"),
                 {"personId": personID}
             )
             results = results_proxy.fetchall()
@@ -466,27 +434,8 @@ def get_partners(
 ) -> List[Dict[str, Any]]:
     try:
         with engine.connect() as connection:
-            # A partner relation can be stored in either direction.
-            # Return at most one partner because domain rules allow 0 or 1 partner.
             results_proxy = connection.execute(
-                text("""
-                    SELECT DISTINCT
-                        p.PersonID,
-                        p.PersonGivvenName,
-                        p.PersonFamilyName,
-                        p.PersonDateOfBirth,
-                        p.PersonDateOfDeath
-                    FROM relations r
-                    JOIN relationnames rn ON r.RelationName = rn.RelationnameID
-                    JOIN persons p ON p.PersonID = CASE
-                        WHEN r.RelationPerson = :personId THEN r.RelationWithPerson
-                        ELSE r.RelationPerson
-                    END
-                    WHERE (r.RelationPerson = :personId OR r.RelationWithPerson = :personId)
-                    AND rn.RelationnameName IN ('Partner', 'Echtgenoot', 'Echtgenote')
-                    ORDER BY p.PersonID
-                    LIMIT 1
-                """),
+                text("call GetPartnerForPerson(:personId)"),
                 {"personId": personID}
             )
             results = results_proxy.fetchall()
@@ -1004,7 +953,7 @@ async def download_file(request: Request, file_id: int) -> FileResponse:
         # Get file metadata from database
         with engine.connect() as conn:
             result = conn.execute(
-                text("SELECT FilePath, FileName, OriginalFileName, MimeType FROM files WHERE FileID = :file_id"),
+                text("call GetFileMeta(:file_id)"),
                 {'file_id': file_id}
             ).fetchone()
             
@@ -1060,7 +1009,7 @@ async def get_file_thumbnail(request: Request, file_id: int) -> StreamingRespons
         # Get file metadata from database
         with engine.connect() as conn:
             result = conn.execute(
-                text("SELECT FilePath, MimeType FROM files WHERE FileID = :file_id"),
+                text("call GetFileMeta(:file_id)"),
                 {'file_id': file_id}
             ).fetchone()
             
@@ -1132,15 +1081,7 @@ async def get_person_files(request: Request, person_id: int) -> List[Dict[str, A
     try:
         with engine.connect() as conn:
             results = conn.execute(
-                text("""
-                    SELECT 
-                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
-                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
-                    FROM files f
-                    INNER JOIN person_files pf ON f.FileID = pf.FileID
-                    WHERE pf.PersonID = :person_id
-                    ORDER BY f.CreatedAt DESC
-                """),
+                text("call GetPersonFiles(:person_id)"),
                 {'person_id': person_id}
             ).fetchall()
             
@@ -1184,15 +1125,7 @@ async def get_family_files(
     try:
         with engine.connect() as conn:
             results = conn.execute(
-                text("""
-                    SELECT 
-                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
-                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
-                    FROM files f
-                    INNER JOIN family_files ff ON f.FileID = ff.FileID
-                    WHERE ff.FatherID = :father_id AND ff.MotherID = :mother_id
-                    ORDER BY f.CreatedAt DESC
-                """),
+                text("call GetFamilyFiles(:father_id, :mother_id)"),
                 {'father_id': father_id, 'mother_id': mother_id}
             ).fetchall()
             
