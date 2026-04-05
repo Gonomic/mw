@@ -670,6 +670,39 @@ class TestPersonWriteEndpoints:
     @patch('main.require_admin_role')
     @patch('main.verify_sso_token')
     @patch('main.engine')
+    def test_update_person_returns_specific_not_found_error(self, mock_engine, mock_verify_sso_token, mock_require_admin_role):
+        """UpdatePerson should preserve the specific not-found response from ChangePerson_v2."""
+        mock_require_admin_role.return_value = None
+        mock_verify_sso_token.return_value = {'sub': 'admin-user'}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        result_row = Mock()
+        result_row._asdict.return_value = {
+            'CompletedOk': 1,
+            'Result': 404,
+            'ErrorMessage': 'Persoon niet gevonden',
+        }
+        mock_connection.execute.return_value.fetchall.return_value = [result_row]
+
+        response = client.post(
+            '/UpdatePerson',
+            headers={'Authorization': 'Bearer valid-test-token'},
+            json={
+                'personId': 999999,
+                'PersonGivvenName': 'Jan',
+                'PersonFamilyName': 'Jansen',
+                'PersonIsMale': 1,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {'success': False, 'error': 'Persoon niet gevonden'}
+
+    @patch('main.require_admin_role')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
     def test_add_person_uses_returned_person_id_from_sproc(self, mock_engine, mock_verify_sso_token, mock_require_admin_role):
         """AddPerson should use PersonID returned by AddPerson_v2 and skip fallback SELECT."""
         mock_require_admin_role.return_value = None

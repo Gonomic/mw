@@ -567,9 +567,13 @@ def update_person(
             if results and len(results) > 0:
                 result_dict = results[0]._asdict() if hasattr(results[0], '_asdict') else dict(results[0])
                 completed_ok = result_dict.get('CompletedOk')
+                result_code = result_dict.get('Result')
+                error_message = result_dict.get('ErrorMessage')
                 if completed_ok is not None and completed_ok != 0:
                     logger.warning(f"ChangePerson returned CompletedOk: {completed_ok}")
                     connection.rollback()
+                    if completed_ok == 1 and result_code == 404:
+                        return {"success": False, "error": error_message or "Persoon niet gevonden"}
                     return {"success": False, "error": "Wijziging mislukt - controleer database logs"}
 
             connection.commit()
