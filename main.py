@@ -87,33 +87,15 @@ def format_result(results: List[Any]) -> List[Dict[str, Any]]:
     result_dicts = [row._asdict() for row in results]
     return [{"numberOfRecords": len(result_dicts)}, *result_dicts]
 
-RELEASE_TABLES = {
-    "fe": ("fe_releases", "fe_release_changes"),
-    "mw": ("mw_releases", "mw_release_changes"),
-    "be": ("be_releases", "be_release_changes"),
-}
-
 def fetch_releases(component: str) -> List[Dict[str, Any]]:
-    if component not in RELEASE_TABLES:
+    if component not in {"fe", "mw", "be"}:
         raise HTTPException(status_code=400, detail="Invalid component. Use fe, mw, or be.")
 
-    releases_table, changes_table = RELEASE_TABLES[component]
-    query = text(f"""
-        SELECT
-            r.ReleaseID,
-            r.ReleaseNumber,
-            DATE_FORMAT(r.ReleaseDate, '%Y-%m-%d %H:%i:%s') AS ReleaseDate,
-            r.Description,
-            c.ChangeID,
-            c.ChangeDescription,
-            c.ChangeType
-        FROM {releases_table} r
-        LEFT JOIN {changes_table} c ON c.ReleaseID = r.ReleaseID
-        ORDER BY r.ReleaseDate DESC, r.ReleaseID DESC, c.ChangeID ASC
-    """)
-
     with engine.connect() as connection:
-        rows = connection.execute(query).fetchall()
+        rows = connection.execute(
+            text("call GetReleasesByComponent(:componentIn)"),
+            {"componentIn": component}
+        ).fetchall()
 
     releases: Dict[int, Dict[str, Any]] = {}
     for row in rows:
@@ -399,22 +381,8 @@ def get_person_details(
 ) -> List[Dict[str, Any]]:
     try:
         with engine.connect() as connection:
-            # Use simple SELECT instead of stored procedure to avoid missing columns
             results_proxy = connection.execute(
-                text("""
-                    SELECT 
-                        PersonID,
-                        PersonGivvenName,
-                        PersonFamilyName,
-                        PersonDateOfBirth,
-                        PersonPlaceOfBirth,
-                        PersonDateOfDeath,
-                        PersonPlaceOfDeath,
-                        PersonIsMale,
-                        DATE_FORMAT(Timestamp,'%Y-%m-%d %T') as Timestamp
-                    FROM persons
-                    WHERE PersonID = :personId
-                """),
+                text("call GetPersonDetails_v2(:personId)"),
                 {"personId": personID}
             )
             results = results_proxy.fetchall()
@@ -466,27 +434,8 @@ def get_partners(
 ) -> List[Dict[str, Any]]:
     try:
         with engine.connect() as connection:
-            # A partner relation can be stored in either direction.
-            # Return at most one partner because domain rules allow 0 or 1 partner.
             results_proxy = connection.execute(
-                text("""
-                    SELECT DISTINCT
-                        p.PersonID,
-                        p.PersonGivvenName,
-                        p.PersonFamilyName,
-                        p.PersonDateOfBirth,
-                        p.PersonDateOfDeath
-                    FROM relations r
-                    JOIN relationnames rn ON r.RelationName = rn.RelationnameID
-                    JOIN persons p ON p.PersonID = CASE
-                        WHEN r.RelationPerson = :personId THEN r.RelationWithPerson
-                        ELSE r.RelationPerson
-                    END
-                    WHERE (r.RelationPerson = :personId OR r.RelationWithPerson = :personId)
-                    AND rn.RelationnameName IN ('Partner', 'Echtgenoot', 'Echtgenote')
-                    ORDER BY p.PersonID
-                    LIMIT 1
-                """),
+                text("call GetPartnerForPerson(:personId)"),
                 {"personId": personID}
             )
             results = results_proxy.fetchall()
@@ -572,22 +521,8 @@ def update_person(
     try:
         with engine.connect() as connection:
             person_id = person_data.get('personId')
-            
-            # Get current person details for status fields (if not provided)
-            person_result = connection.execute(
-                text("""
-                    SELECT PersonDateOfBirthStatus, PersonDateOfDeathStatus
-                    FROM persons
-                    WHERE PersonID = :personId
-                """),
-                {"personId": person_id}
-            ).fetchone()
-            
-            if not person_result:
-                return {"success": False, "error": "Persoon niet gevonden"}
-            
-            birth_status = person_result[0] if person_result[0] is not None else 0
-            death_status = person_result[1] if person_result[1] is not None else 0
+            birth_status = person_data.get('PersonDateOfBirthStatus')
+            death_status = person_data.get('PersonDateOfDeathStatus')
             
             # Use relation IDs from request (frontend now sends these)
             person_is_male = person_data.get('PersonIsMale')
@@ -595,9 +530,9 @@ def update_person(
             father_id = person_data.get('FatherId')
             partner_id = person_data.get('PartnerId')
             
-            # Call ChangePerson with all 13 parameters
+            # Call ChangePerson_v2 so the DB keeps existing status values when not provided.
             results_proxy = connection.execute(
-                text("""call ChangePerson(
+                text("""call ChangePerson_v2(
                     :personId, 
                     :givvenName, 
                     :familyName, 
@@ -632,9 +567,13 @@ def update_person(
             if results and len(results) > 0:
                 result_dict = results[0]._asdict() if hasattr(results[0], '_asdict') else dict(results[0])
                 completed_ok = result_dict.get('CompletedOk')
+                result_code = result_dict.get('Result')
+                error_message = result_dict.get('ErrorMessage')
                 if completed_ok is not None and completed_ok != 0:
                     logger.warning(f"ChangePerson returned CompletedOk: {completed_ok}")
                     connection.rollback()
+                    if completed_ok == 1 and result_code == 404:
+                        return {"success": False, "error": error_message or "Persoon niet gevonden"}
                     return {"success": False, "error": "Wijziging mislukt - controleer database logs"}
 
             connection.commit()
@@ -654,14 +593,12 @@ def add_person(
     
     try:
         with engine.connect() as connection:
-            full_name = f"{person_data.get('PersonGivvenName', '')} {person_data.get('PersonFamilyName', '')}".strip()
-
             is_male = person_data.get('PersonIsMale')
             
-            # Call AddPerson procedure
+            # Call AddPerson_v2 so the new PersonID is returned in the first result set.
             try:
                 results_proxy = connection.execute(
-                    text("""call AddPerson(
+                    text("""call AddPerson_v2(
                         NULL,
                         :givvenName, 
                         :familyName, 
@@ -673,8 +610,8 @@ def add_person(
                         :motherId,
                         :fatherId,
                         :partnerId,
-                        0,
-                        0
+                        :birthStatus,
+                        :deathStatus
                     )"""),
                     {
                         "givvenName": person_data.get('PersonGivvenName', ''),
@@ -687,6 +624,8 @@ def add_person(
                         "motherId": person_data.get('MotherId') or None,
                         "fatherId": person_data.get('FatherId') or None,
                         "partnerId": person_data.get('PartnerId') or None,
+                        "birthStatus": person_data.get('PersonDateOfBirthStatus', 0),
+                        "deathStatus": person_data.get('PersonDateOfDeathStatus', 0),
                     }
                 )
                 results = results_proxy.fetchall()
@@ -699,6 +638,13 @@ def add_person(
                         logger.error(f"AddPerson procedure failed with CompletedOk={result_dict.get('CompletedOk')}")
                         connection.rollback()
                         return {"success": False, "error": "Database procedure mislukt"}
+
+                    if 'PersonID' in result_dict and result_dict.get('PersonID') is not None:
+                        connection.commit()
+                        return {
+                            "success": True,
+                            "personId": result_dict.get('PersonID')
+                        }
                 
                 connection.commit()
                 
@@ -712,31 +658,8 @@ def add_person(
                     return {"success": False, "error": "Vader/Moeder ID niet gevonden"}
                 return {"success": False, "error": f"Database fout: {error_msg[:50]}"}
             
-            # Now fetch the inserted person by name and other details
-            select_results = connection.execute(
-                text("""
-                    SELECT PersonID, PersonGivvenName, PersonFamilyName, PersonDateOfBirth, 
-                           PersonPlaceOfBirth, PersonDateOfDeath, PersonPlaceOfDeath, PersonIsMale
-                    FROM persons 
-                    WHERE PersonGivvenName = :givvenName AND PersonFamilyName = :familyName
-                    ORDER BY PersonID DESC
-                    LIMIT 1
-                """),
-                {
-                    "givvenName": person_data.get('PersonGivvenName', ''),
-                    "familyName": person_data.get('PersonFamilyName', '')
-                }
-            ).fetchall()
-            
-            if select_results and len(select_results) > 0:
-                person_dict = select_results[0]._asdict() if hasattr(select_results[0], '_asdict') else dict(select_results[0])
-                return {
-                    "success": True, 
-                    "personId": person_dict.get('PersonID')
-                }
-            else:
-                logger.error("Could not find inserted person after AddPerson procedure")
-                return {"success": False, "error": "Persoon opgeslaan maar kon niet worden opgehaald"}
+            logger.error("AddPerson did not return a PersonID in the first result set")
+            return {"success": False, "error": "Persoon opgeslaan maar kon niet worden opgehaald"}
                 
     except Exception as e:
         logger.error(f"Error in add_person: {e}", exc_info=True)
@@ -855,6 +778,8 @@ async def upload_file(
     Returns:
         Dict with file_id and success status
     """
+    written_file_path = None
+
     try:
         original_filename = file.filename or "unknown"
         logger.info(f"File upload: scope={scope}, entity={entity_id}, type={document_type}")
@@ -926,6 +851,7 @@ async def upload_file(
         # Write file to disk
         with open(file_path, 'wb') as f:
             f.write(contents)
+        written_file_path = file_path
         
         logger.info(f"File written to disk: {file_path}")
         
@@ -933,41 +859,67 @@ async def upload_file(
         user_claims = getattr(request.state, 'user', {})
         uploaded_by = user_claims.get('preferred_username') or user_claims.get('sub', 'unknown')
         
-        # Insert metadata into database
+        # Insert metadata into database via sprocs
         with engine.connect() as conn:
-            # Insert into files table
-            result = conn.execute(
-                text("""
-                    INSERT INTO files 
-                    (FilePath, FileName, OriginalFileName, DocumentType, Year, FileSize, MimeType, UploadedBy)
-                    VALUES (:path, :filename, :original, :doctype, :year, :size, :mime, :uploaded_by)
-                """),
-                {
-                    'path': relative_path,
-                    'filename': filename,
-                    'original': original_filename,
-                    'doctype': document_type,
-                    'year': year if year else None,
-                    'size': file_size,
-                    'mime': mime_type,
-                    'uploaded_by': uploaded_by
-                }
-            )
-            file_id = result.lastrowid
-            
-            # Create appropriate link
+            sproc_params = {
+                'path': relative_path,
+                'filename': filename,
+                'original': original_filename,
+                'doctype': document_type,
+                'year': year if year else None,
+                'size': file_size,
+                'mime': mime_type,
+                'uploaded_by': uploaded_by
+            }
+
             if scope == "person":
-                conn.execute(
-                    text("INSERT INTO person_files (PersonID, FileID) VALUES (:person_id, :file_id)"),
-                    {'person_id': person_id, 'file_id': file_id}
-                )
+                sproc_result = conn.execute(
+                    text("""
+                        call AddFileForPerson(
+                            :path,
+                            :filename,
+                            :original,
+                            :doctype,
+                            :year,
+                            :size,
+                            :mime,
+                            :uploaded_by,
+                            :person_id
+                        )
+                    """),
+                    {**sproc_params, 'person_id': person_id}
+                ).fetchone()
             else:  # family
-                conn.execute(
-                    text("INSERT INTO family_files (FatherID, MotherID, FileID) VALUES (:father_id, :mother_id, :file_id)"),
-                    {'father_id': father_id, 'mother_id': mother_id, 'file_id': file_id}
+                sproc_result = conn.execute(
+                    text("""
+                        call AddFileForFamily(
+                            :path,
+                            :filename,
+                            :original,
+                            :doctype,
+                            :year,
+                            :size,
+                            :mime,
+                            :uploaded_by,
+                            :father_id,
+                            :mother_id
+                        )
+                    """),
+                    {**sproc_params, 'father_id': father_id, 'mother_id': mother_id}
+                ).fetchone()
+
+            if not sproc_result:
+                raise RuntimeError("No result returned from file upload stored procedure")
+
+            result_dict = sproc_result._asdict() if hasattr(sproc_result, '_asdict') else dict(sproc_result)
+            completed_ok = result_dict.get('CompletedOk')
+            result_code = result_dict.get('Result')
+            file_id = result_dict.get('FileID')
+
+            if completed_ok != 0 or file_id is None:
+                raise RuntimeError(
+                    f"Stored procedure failed (CompletedOk={completed_ok}, Result={result_code}, FileID={file_id})"
                 )
-            
-            conn.commit()
         
         logger.info(f"File metadata saved to database: file_id={file_id}")
         
@@ -983,8 +935,20 @@ async def upload_file(
         }
         
     except HTTPException:
+        if written_file_path and written_file_path.exists():
+            try:
+                written_file_path.unlink()
+                logger.warning(f"Removed uploaded file after failed DB operation: {written_file_path}")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup file after HTTP error: {cleanup_error}")
         raise
     except Exception as e:
+        if written_file_path and written_file_path.exists():
+            try:
+                written_file_path.unlink()
+                logger.warning(f"Removed uploaded file after failed DB operation: {written_file_path}")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup file after upload failure: {cleanup_error}")
         logger.error(f"Error uploading file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
@@ -1004,7 +968,7 @@ async def download_file(request: Request, file_id: int) -> FileResponse:
         # Get file metadata from database
         with engine.connect() as conn:
             result = conn.execute(
-                text("SELECT FilePath, FileName, OriginalFileName, MimeType FROM files WHERE FileID = :file_id"),
+                text("call GetFileMeta(:file_id)"),
                 {'file_id': file_id}
             ).fetchone()
             
@@ -1060,7 +1024,7 @@ async def get_file_thumbnail(request: Request, file_id: int) -> StreamingRespons
         # Get file metadata from database
         with engine.connect() as conn:
             result = conn.execute(
-                text("SELECT FilePath, MimeType FROM files WHERE FileID = :file_id"),
+                text("call GetFileMeta(:file_id)"),
                 {'file_id': file_id}
             ).fetchone()
             
@@ -1132,15 +1096,7 @@ async def get_person_files(request: Request, person_id: int) -> List[Dict[str, A
     try:
         with engine.connect() as conn:
             results = conn.execute(
-                text("""
-                    SELECT 
-                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
-                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
-                    FROM files f
-                    INNER JOIN person_files pf ON f.FileID = pf.FileID
-                    WHERE pf.PersonID = :person_id
-                    ORDER BY f.CreatedAt DESC
-                """),
+                text("call GetPersonFiles(:person_id)"),
                 {'person_id': person_id}
             ).fetchall()
             
@@ -1184,15 +1140,7 @@ async def get_family_files(
     try:
         with engine.connect() as conn:
             results = conn.execute(
-                text("""
-                    SELECT 
-                        f.FileID, f.FileName, f.OriginalFileName, f.DocumentType, 
-                        f.Year, f.FileSize, f.MimeType, f.CreatedAt, f.UploadedBy
-                    FROM files f
-                    INNER JOIN family_files ff ON f.FileID = ff.FileID
-                    WHERE ff.FatherID = :father_id AND ff.MotherID = :mother_id
-                    ORDER BY f.CreatedAt DESC
-                """),
+                text("call GetFamilyFiles(:father_id, :mother_id)"),
                 {'father_id': father_id, 'mother_id': mother_id}
             ).fetchall()
             
