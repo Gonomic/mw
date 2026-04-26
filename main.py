@@ -182,6 +182,97 @@ def _map_marriage_result_to_http(result_code: Any) -> int:
         return code
     return 500
 
+
+def _extract_username_from_request(request: Request) -> str:
+    access = getattr(request.state, "user_access", {}) or {}
+    claims = getattr(request.state, "user", {}) or {}
+
+    username = (
+        access.get("username")
+        or claims.get("preferred_username")
+        or claims.get("username")
+        or claims.get("sub")
+        or ""
+    )
+    normalized_username = str(username).strip()
+    if "@" in normalized_username:
+        normalized_username = normalized_username.split("@", 1)[0]
+
+    if not normalized_username:
+        raise HTTPException(status_code=401, detail="Gebruikersnaam kon niet worden bepaald vanuit sessie/JWT")
+
+    return normalized_username
+
+
+def _parse_optional_person_id(value: Any) -> Optional[int]:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return None
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="linked_person_id moet een geldig getal zijn")
+
+    if parsed <= 0:
+        raise HTTPException(status_code=400, detail="linked_person_id moet groter zijn dan 0")
+
+    return parsed
+
+
+def _parse_generation_count(value: Any, field_name: str, default_value: int = 3) -> int:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return default_value
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} moet een geldig getal zijn")
+
+    if parsed < 0 or parsed > 10:
+        raise HTTPException(status_code=400, detail=f"{field_name} moet tussen 0 en 10 liggen")
+
+    return parsed
+
+
+def _parse_auto_show_flag(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return 0
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return 1
+        if normalized in {"false", "0", "no", "off"}:
+            return 0
+
+    try:
+        return 1 if int(value) != 0 else 0
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="auto_show_tree moet true/false of 0/1 zijn")
+
+
+def _default_user_preferences_payload(username: str) -> Dict[str, Any]:
+    return {
+        "username": username,
+        "linked_person_id": None,
+        "generations_up": 3,
+        "generations_down": 3,
+        "auto_show_tree": False,
+    }
+
+
+def _normalize_preferences_row(row_dict: Dict[str, Any], username_fallback: str) -> Dict[str, Any]:
+    return {
+        "username": row_dict.get("username") or username_fallback,
+        "linked_person_id": row_dict.get("linked_person_id"),
+        "generations_up": int(row_dict.get("generations_up") or 3),
+        "generations_down": int(row_dict.get("generations_down") or 3),
+        "auto_show_tree": bool(row_dict.get("auto_show_tree", 0)),
+    }
+
 def fetch_releases(component: str) -> List[Dict[str, Any]]:
     if component not in {"fe", "mw", "be"}:
         raise HTTPException(status_code=400, detail="Invalid component. Use fe, mw, or be.")
@@ -354,6 +445,88 @@ def get_authenticated_user(request: Request) -> Dict[str, Any]:
         "is_admin": bool(access.get("is_admin", False)),
         "is_user": bool(access.get("is_user", False)),
     }
+
+
+@app.get("/user/my-preferences")
+def get_my_preferences(request: Request) -> Dict[str, Any]:
+    username = _extract_username_from_request(request)
+
+    try:
+        with engine.connect() as connection:
+            results_proxy = connection.execute(
+                text("call GetUserPreferences(:usernameIn)"),
+                {"usernameIn": username},
+            )
+            results = results_proxy.fetchall()
+
+            if not results:
+                return _default_user_preferences_payload(username)
+
+            row_dict = results[0]._asdict() if hasattr(results[0], "_asdict") else dict(results[0])
+            return _normalize_preferences_row(row_dict, username)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_my_preferences: {e}")
+        raise HTTPException(status_code=500, detail="Voorkeuren ophalen is mislukt")
+
+
+@app.put("/user/my-preferences")
+def set_my_preferences(request: Request, preferences_data: Dict[str, Any]) -> Dict[str, Any]:
+    username = _extract_username_from_request(request)
+    linked_person_id = _parse_optional_person_id(preferences_data.get("linked_person_id"))
+    generations_up = _parse_generation_count(preferences_data.get("generations_up"), "generations_up", default_value=3)
+    generations_down = _parse_generation_count(preferences_data.get("generations_down"), "generations_down", default_value=3)
+    auto_show_tree = _parse_auto_show_flag(preferences_data.get("auto_show_tree"))
+
+    try:
+        with engine.connect() as connection:
+            if linked_person_id is not None:
+                person_exists_row = connection.execute(
+                    text("SELECT COUNT(*) AS NumberOfRecords FROM persons WHERE PersonID = :personId"),
+                    {"personId": linked_person_id},
+                ).fetchone()
+                person_exists_count = int(person_exists_row.NumberOfRecords if person_exists_row else 0)
+                if person_exists_count < 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"linked_person_id {linked_person_id} bestaat niet in de persons-tabel",
+                    )
+
+            results_proxy = connection.execute(
+                text("call SetUserPreferences(:usernameIn, :personIdIn, :genUpIn, :genDownIn, :autoShowIn)"),
+                {
+                    "usernameIn": username,
+                    "personIdIn": linked_person_id,
+                    "genUpIn": generations_up,
+                    "genDownIn": generations_down,
+                    "autoShowIn": auto_show_tree,
+                },
+            )
+            results = results_proxy.fetchall()
+            result_dict = _extract_proc_result(results, "SetUserPreferences")
+
+            if int(result_dict.get("CompletedOk", 1)) != 0:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=_map_marriage_result_to_http(result_dict.get("Result")),
+                    detail=result_dict.get("ErrorMessage") or "Opslaan van voorkeuren is mislukt",
+                )
+
+            connection.commit()
+
+            return {
+                "username": username,
+                "linked_person_id": linked_person_id,
+                "generations_up": generations_up,
+                "generations_down": generations_down,
+                "auto_show_tree": bool(auto_show_tree),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in set_my_preferences: {e}")
+        raise HTTPException(status_code=500, detail="Voorkeuren opslaan is mislukt")
 
 @app.post("/auth/keepalive")
 def session_keepalive(request: Request) -> Dict[str, Any]:

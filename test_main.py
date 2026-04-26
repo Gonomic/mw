@@ -907,3 +907,144 @@ class TestPersonWriteEndpoints:
         assert 'AddPerson_v2' in str(call_args[0][0])
         assert call_args[0][1]['birthStatus'] == 0
         assert call_args[0][1]['deathStatus'] == 0
+
+
+class TestUserPreferencesEndpoints:
+    """Test suite for /user/my-preferences endpoints."""
+
+    @patch('main.resolve_ldap_role_from_claims')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_get_my_preferences_returns_defaults_when_absent(self, mock_engine, mock_verify_sso_token, mock_resolve_ldap_role):
+        mock_verify_sso_token.return_value = {'preferred_username': 'jan'}
+        mock_resolve_ldap_role.return_value = {'username': 'jan', 'role': 'user', 'is_user': True, 'is_admin': False}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        mock_results_proxy = Mock()
+        mock_results_proxy.fetchall.return_value = []
+        mock_connection.execute.return_value = mock_results_proxy
+
+        response = client.get(
+            '/user/my-preferences',
+            headers={'Authorization': 'Bearer valid-test-token'},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            'username': 'jan',
+            'linked_person_id': None,
+            'generations_up': 3,
+            'generations_down': 3,
+            'auto_show_tree': False,
+        }
+
+    @patch('main.resolve_ldap_role_from_claims')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_get_my_preferences_returns_existing_values(self, mock_engine, mock_verify_sso_token, mock_resolve_ldap_role):
+        mock_verify_sso_token.return_value = {'preferred_username': 'jan'}
+        mock_resolve_ldap_role.return_value = {'username': 'jan', 'role': 'user', 'is_user': True, 'is_admin': False}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        row = Mock()
+        row._asdict.return_value = {
+            'username': 'jan',
+            'linked_person_id': 42,
+            'generations_up': 4,
+            'generations_down': 2,
+            'auto_show_tree': 1,
+        }
+
+        mock_results_proxy = Mock()
+        mock_results_proxy.fetchall.return_value = [row]
+        mock_connection.execute.return_value = mock_results_proxy
+
+        response = client.get(
+            '/user/my-preferences',
+            headers={'Authorization': 'Bearer valid-test-token'},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            'username': 'jan',
+            'linked_person_id': 42,
+            'generations_up': 4,
+            'generations_down': 2,
+            'auto_show_tree': True,
+        }
+
+    @patch('main.resolve_ldap_role_from_claims')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_set_my_preferences_rejects_unknown_linked_person(self, mock_engine, mock_verify_sso_token, mock_resolve_ldap_role):
+        mock_verify_sso_token.return_value = {'preferred_username': 'jan'}
+        mock_resolve_ldap_role.return_value = {'username': 'jan', 'role': 'user', 'is_user': True, 'is_admin': False}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        person_exists_proxy = Mock()
+        person_exists_proxy.fetchone.return_value = Mock(NumberOfRecords=0)
+        mock_connection.execute.return_value = person_exists_proxy
+
+        response = client.put(
+            '/user/my-preferences',
+            headers={'Authorization': 'Bearer valid-test-token'},
+            json={
+                'username': 'somebody-else',
+                'linked_person_id': 9999,
+                'generations_up': 3,
+                'generations_down': 3,
+                'auto_show_tree': True,
+            },
+        )
+
+        assert response.status_code == 400
+        assert 'bestaat niet in de persons-tabel' in response.json()['detail']
+
+    @patch('main.resolve_ldap_role_from_claims')
+    @patch('main.verify_sso_token')
+    @patch('main.engine')
+    def test_set_my_preferences_saves_for_authenticated_user(self, mock_engine, mock_verify_sso_token, mock_resolve_ldap_role):
+        mock_verify_sso_token.return_value = {'preferred_username': 'jan'}
+        mock_resolve_ldap_role.return_value = {'username': 'jan', 'role': 'user', 'is_user': True, 'is_admin': False}
+
+        mock_connection = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_connection
+
+        person_exists_proxy = Mock()
+        person_exists_proxy.fetchone.return_value = Mock(NumberOfRecords=1)
+
+        save_proc_row = Mock()
+        save_proc_row._asdict.return_value = {'CompletedOk': 0, 'Result': 0, 'ErrorMessage': None}
+        save_proc_proxy = Mock()
+        save_proc_proxy.fetchall.return_value = [save_proc_row]
+
+        mock_connection.execute.side_effect = [person_exists_proxy, save_proc_proxy]
+
+        response = client.put(
+            '/user/my-preferences',
+            headers={'Authorization': 'Bearer valid-test-token'},
+            json={
+                'username': 'malicious-override',
+                'linked_person_id': 42,
+                'generations_up': 5,
+                'generations_down': 1,
+                'auto_show_tree': True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            'username': 'jan',
+            'linked_person_id': 42,
+            'generations_up': 5,
+            'generations_down': 1,
+            'auto_show_tree': True,
+        }
+
+        assert mock_connection.commit.call_count == 1
