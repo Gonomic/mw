@@ -104,6 +104,7 @@ MARRIAGE_END_REASONS = {
 
 
 def _parse_required_int(value: Any, field_name: str) -> int:
+    """Parse and validate required positive integer inputs from request values."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
         raise HTTPException(status_code=400, detail=f"{field_name} is verplicht")
     try:
@@ -118,6 +119,7 @@ def _parse_required_int(value: Any, field_name: str) -> int:
 
 
 def _parse_required_date(value: Any, field_name: str) -> date:
+    """Parse YYYY-MM-DD values and return date objects for required date fields."""
     if value is None:
         raise HTTPException(status_code=400, detail=f"{field_name} is verplicht")
 
@@ -134,6 +136,7 @@ def _parse_required_date(value: Any, field_name: str) -> date:
 
 
 def _parse_optional_text(value: Any, field_name: str, max_length: int = 255) -> Optional[str]:
+    """Normalize optional text fields: trim, empty-to-None, and max length validation."""
     if value is None:
         return None
 
@@ -151,6 +154,7 @@ def _parse_optional_text(value: Any, field_name: str, max_length: int = 255) -> 
 
 
 def _parse_end_reason(value: Any) -> str:
+    """Validate marriage end-reason against the fixed allowed domain values."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
         raise HTTPException(status_code=400, detail="endReason is verplicht")
 
@@ -165,6 +169,7 @@ def _parse_end_reason(value: Any) -> str:
 
 
 def _extract_proc_result(results: List[Any], operation_name: str) -> Dict[str, Any]:
+    """Extract the first row returned by a stored procedure call or raise API error."""
     if not results:
         raise HTTPException(status_code=500, detail=f"{operation_name} gaf geen resultaat terug")
 
@@ -173,6 +178,7 @@ def _extract_proc_result(results: List[Any], operation_name: str) -> Dict[str, A
 
 
 def _map_marriage_result_to_http(result_code: Any) -> int:
+    """Map known business result codes from Add/EndMarriage sprocs to HTTP status codes."""
     try:
         code = int(result_code)
     except (TypeError, ValueError):
@@ -184,6 +190,7 @@ def _map_marriage_result_to_http(result_code: Any) -> int:
 
 
 def _extract_username_from_request(request: Request) -> str:
+    """Resolve username from auth/session claims with deterministic fallback order."""
     access = getattr(request.state, "user_access", {}) or {}
     claims = getattr(request.state, "user", {}) or {}
 
@@ -205,6 +212,7 @@ def _extract_username_from_request(request: Request) -> str:
 
 
 def _parse_optional_person_id(value: Any) -> Optional[int]:
+    """Parse linked_person_id where empty means None and non-empty must be positive int."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return None
 
@@ -220,6 +228,7 @@ def _parse_optional_person_id(value: Any) -> Optional[int]:
 
 
 def _parse_generation_count(value: Any, field_name: str, default_value: int = 3) -> int:
+    """Parse generation depth with defaults and safety bounds to prevent expensive tree queries."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return default_value
 
@@ -235,6 +244,7 @@ def _parse_generation_count(value: Any, field_name: str, default_value: int = 3)
 
 
 def _parse_auto_show_flag(value: Any) -> int:
+    """Normalize bool-like values (true/false, 1/0, yes/no) to database-compatible 0/1."""
     if isinstance(value, bool):
         return 1 if value else 0
 
@@ -255,6 +265,7 @@ def _parse_auto_show_flag(value: Any) -> int:
 
 
 def _default_user_preferences_payload(username: str) -> Dict[str, Any]:
+    """Return default preferences when no row exists yet for the authenticated user."""
     return {
         "username": username,
         "linked_person_id": None,
@@ -265,6 +276,7 @@ def _default_user_preferences_payload(username: str) -> Dict[str, Any]:
 
 
 def _normalize_preferences_row(row_dict: Dict[str, Any], username_fallback: str) -> Dict[str, Any]:
+    """Normalize DB row values to stable API response types for FE consumption."""
     return {
         "username": row_dict.get("username") or username_fallback,
         "linked_person_id": row_dict.get("linked_person_id"),
@@ -331,6 +343,10 @@ def create_cors_json_response(status_code: int, content: dict, origin: str = Non
 
 @app.middleware("http")
 async def require_sso_middleware(request: Request, call_next):
+    """Enforce JWT/session authentication for non-public endpoints.
+
+    Priority: bearer token -> file-route query token -> server session fallback.
+    """
     if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
         return await call_next(request)
 
@@ -375,6 +391,7 @@ async def require_sso_middleware(request: Request, call_next):
 
 @app.get("/")
 def read_root() -> Dict[str, str]:
+    """Lightweight health/info endpoint used for quick API reachability checks."""
     return {"message": "Familiez API", "status": "OK"}
 
 @app.get("/auth/discovery")
@@ -436,6 +453,7 @@ def oauth_callback(request_data: Dict[str, str]) -> Dict[str, str]:
 
 @app.get("/auth/me")
 def get_authenticated_user(request: Request) -> Dict[str, Any]:
+    """Return normalized authenticated user identity and resolved authorization flags."""
     claims = getattr(request.state, "user", {}) or {}
     access = getattr(request.state, "user_access", {}) or {}
     return {
@@ -449,6 +467,7 @@ def get_authenticated_user(request: Request) -> Dict[str, Any]:
 
 @app.get("/user/my-preferences")
 def get_my_preferences(request: Request) -> Dict[str, Any]:
+    """Get tree preferences for the authenticated user or return defaults when absent."""
     username = _extract_username_from_request(request)
 
     try:
@@ -473,6 +492,7 @@ def get_my_preferences(request: Request) -> Dict[str, Any]:
 
 @app.put("/user/my-preferences")
 def set_my_preferences(request: Request, preferences_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and persist tree preferences for the authenticated user via SetUserPreferences."""
     username = _extract_username_from_request(request)
     linked_person_id = _parse_optional_person_id(preferences_data.get("linked_person_id"))
     generations_up = _parse_generation_count(preferences_data.get("generations_up"), "generations_up", default_value=3)
@@ -570,6 +590,7 @@ def get_session_info_debug(request: Request) -> Dict[str, Any]:
 
 @app.get("/pingAPI")
 def ping_api(timestampFE: datetime) -> List[Dict[str, str]]:
+    """Round-trip timing endpoint between frontend and middleware (no DB access)."""
     return [{
         "FE request time": timestampFE.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3],
         "MW request time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
@@ -577,6 +598,7 @@ def ping_api(timestampFE: datetime) -> List[Dict[str, str]]:
 
 @app.get("/pingDB")
 def ping_db(timestampFE: datetime) -> List[Dict[str, Any]]:
+    """Round-trip timing endpoint including DB call latency via PingedDbServer sproc."""
     try:
         with engine.connect() as connection:
             timestampMWrequest = datetime.now()
@@ -597,6 +619,7 @@ def ping_db(timestampFE: datetime) -> List[Dict[str, Any]]:
 def get_persons_like(
     stringToSearchFor: str = Query(..., description="(Part of)Name to search for")
 ) -> List[Dict[str, Any]]:
+    """Search persons by partial name using GetPersonsLike and return counted-result format."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -613,6 +636,7 @@ def get_persons_like(
 def get_siblings(
     parentID: int = Query(..., description="Person ID of the father to lookup the childs for")
 ) -> List[Dict[str, Any]]:
+    """Get children for one parent (siblings list source) via GetAllChildrenWithoutPartnerFromOneParent."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -630,6 +654,7 @@ def get_siblings(
 def get_father(
     childID: int = Query(..., description="Person ID of the child to lookup the father for")
 ) -> List[Dict[str, Any]]:
+    """Resolve father relation for a child using GetFather."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -647,6 +672,7 @@ def get_father(
 def get_person_details(
     personID: int = Query(..., description="Person ID to get details for")
 ) -> List[Dict[str, Any]]:
+    """Get full person details via GetPersonDetails_v2."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -664,6 +690,7 @@ def get_person_details(
 def get_mother(
     childID: int = Query(..., description="Person ID of the child to lookup the mother for")
 ) -> List[Dict[str, Any]]:
+    """Resolve mother relation for a child using GetMother."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -682,6 +709,7 @@ def get_mother(
 def get_children(
     personID: int = Query(..., description="Person ID to get children for")
 ) -> List[Dict[str, Any]]:
+    """Get children linked to one parent via GetAllChildrenWithoutPartnerFromOneParent."""
     try:
         with engine.connect() as connection:
             # Use the correct stored procedure name
@@ -700,6 +728,7 @@ def get_children(
 def get_partners(
     personID: int = Query(..., description="Person ID to get partners for")
 ) -> List[Dict[str, Any]]:
+    """Get partner rows for a person via GetPartnerForPerson."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -715,6 +744,7 @@ def get_partners(
 
 @app.get("/marriages/active/{person_id}")
 def get_active_marriage_for_person(person_id: int) -> List[Dict[str, Any]]:
+    """Return active marriage row(s) for one person via GetActiveMarriageForPerson."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
@@ -730,6 +760,7 @@ def get_active_marriage_for_person(person_id: int) -> List[Dict[str, Any]]:
 
 @app.get("/marriages/history/{person_id}")
 def get_marriage_history_for_person(person_id: int) -> List[Dict[str, Any]]:
+    """Return marriage history rows for one person via GetMarriageHistoryForPerson."""
     try:
         with engine.connect() as connection:
             results_proxy = connection.execute(
